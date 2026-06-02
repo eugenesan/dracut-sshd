@@ -1,0 +1,47 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Source: <url://example.com>
+Upstream-Name: dracut-sshd
+Upstream-Contact: Georg Sauthoff <mail@gms.tf>
+
+Files:
+ *
+Copyright:
+ 2018-2026, Georg Sauthoff <mail@gms.tf>
+
+License: GPLv3+
+ This program is free software: you can redistribute it and/or modify
+ it under the terms of the GNU General Public License as published by
+ the Free Software Foundation, either version 3 of the License, or
+ (at your option) any later version.
+
+ This program is distributed in the hope that it will be useful,
+ but WITHOUT ANY WARRANTY; without even the implied warranty of
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ GNU General Public License for more details.
+
+ You should have received a copy of the GNU General Public License
+ along with this program.
+
+ A copy of the GNU General Public License can be found at:
+ <https://www.gnu.org/licenses/gpl-3.0.html>
+
+Files:
+ debian/*
+Copyright:
+ 2026 Eugene San (eugenesan) <eugenesan@gmail.com>
+License: GPL-2+
+ This package is free software; you can redistribute it and/or modify
+ it under the terms of the GNU General Public License as published by
+ the Free Software Foundation; either version 2 of the License, or
+ (at your option) any later version.
+ .
+ This package is distributed in the hope that it will be useful,
+ but WITHOUT ANY WARRANTY; without even the implied warranty of
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ GNU General Public License for more details.
+ .
+ You should have received a copy of the GNU General Public License
+ along with this package.
+
+ A copy of the GNU General Public License can be found at:
+ <https://www.gnu.org/licenses/old-licenses/gpl-2.0.html>

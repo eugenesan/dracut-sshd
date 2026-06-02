@@ -1,0 +1,10 @@
+debian/module-sshd/sshd.conf etc/dracut.conf.d/
+debian/module-sshd/sshd_config etc/dracut-sshd/
+46sshd usr/lib/dracut/modules.d/
+debian/module-unlock-root/module-setup.sh usr/lib/dracut/modules.d/82unlock-root/
+debian/module-telegram-send/module-setup.sh usr/lib/dracut/modules.d/89telegram-send/
+debian/module-telegram-send/telegram-send.sh usr/lib/dracut/modules.d/89telegram-send/
+debian/module-telegram-send/.telegram_bot usr/share/doc/dracut-sshd/examples/
+debian/module-network-manager-wireless/module-setup.sh usr/lib/dracut/modules.d/30network-manager-wireless/
+debian/module-netplan/module-setup.sh usr/lib/dracut/modules.d/45netplan/
+example/* usr/share/doc/dracut-sshd/examples/

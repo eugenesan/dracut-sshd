@@ -1,0 +1,25 @@
+Source: dracut-sshd
+Section: net
+Priority: optional
+Maintainer: Eugene San (eugenesan) <eugenesan@gmail.com>
+Rules-Requires-Root: no
+Build-Depends: debhelper-compat (= 13)
+Standards-Version: 4.7.2
+Homepage: https://github.com/gsauthof/dracut-sshd
+#Vcs-Browser: https://github.com/gsauthof/dracut-sshd
+#Vcs-Git: git+https://github.com/gsauthof/dracut-sshd.git
+
+Package: dracut-sshd
+Architecture: all
+Depends: dracut, dracut-network, network-manager, netplan.io, wpasupplicant,
+         openssh-server, net-tools, iputils-ping, curl, nano, cryptsetup-initramfs
+Description: Provide SSH access to initramfs early user space
+ This Dracut module integrates the OpenSSH sshd into your
+ initramfs. It allows for remote unlocking of a fully encrypted
+ root filesystem and remote access to the Dracut emergency shell (i.e. early userspace).
+ This package also includes additional modules required for remote network access
+ and sending telegram messages using bot. The following modules are included:
+ * unlock-root - unlocks root user inside initrd
+ * telegram-send - sends telegram message when system is online
+ * network-manager-wireless - adds support for wireless networks
+ * netplan - adds support for default Ubuntu network config

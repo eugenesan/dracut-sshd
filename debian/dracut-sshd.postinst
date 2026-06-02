@@ -1,0 +1,15 @@
+#!/bin/sh
+
+set -e
+
+if [ "$1" != triggered ]; then
+    # activate trigger
+    if dpkg-trigger --no-await update-initramfs; then
+        echo "update-initramfs: deferring update (trigger activated)"
+        exit 0
+    fi
+else
+    DPKG_MAINTSCRIPT_PACKAGE='' update-initramfs -u
+fi
+
+#DEBHELPER#
