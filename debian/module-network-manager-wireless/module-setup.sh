@@ -30,9 +30,9 @@ depends() {
 
 installkernel() {
     # Add specific drivers
-    add_drivers+=" cfg80211 mac80211 rfkill ath9k_htc brcmfmac iwlmvm iwlwifi rt2800usb rtw88_8723du "
-    instmods cfg80211 mac80211 rfkill ath9k_common ath ath9k_htc brcmfmac iwlmvm iwlwifi rt2x00lib rt2x00usb rt2800lib rt2800usb rtw88_8723du
-    inst_multiple -o /lib/firmware/{ath9k_htc*,brcm,iwlmvm,iwlwifi*,rt28*,rtw88*}
+    add_drivers+=" cfg80211 mac80211 rfkill ath9k ath9k_htc brcmfmac brcmfmac_wcc iwlmvm iwlwifi rt2800usb rtw88_8723du "
+    instmods cfg80211 mac80211 rfkill ath9k_common ath ath9k ath9k_htc brcmfmac brcmfmac_wcc iwlmvm iwlwifi rt2x00lib rt2x00usb rt2800lib rt2800usb rtw88_8723du
+    inst_multiple -o /lib/firmware/{brcm,iwlmvm,iwlwifi*,rt28*,rtw88*}
 }
 
 install() {
