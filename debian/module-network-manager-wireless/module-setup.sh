@@ -30,9 +30,9 @@ depends() {
 
 installkernel() {
     # Add specific drivers
-    add_drivers+=" ath9k_htc iwlmvm iwlwifi mac80211 cfg80211 rfkill "
-    instmods iwlmvm mac80211 ath9k_htc ath9k_common ath iwlwifi cfg80211 rfkill rtw88_8723du
-    inst_multiple -o /lib/firmware/{iwlwifi*,iwlmvm,ath9k_htc*,rtw88*}
+    add_drivers+=" cfg80211 mac80211 rfkill ath9k_htc brcmfmac iwlmvm iwlwifi rt2800usb rtw88_8723du "
+    instmods cfg80211 mac80211 rfkill ath9k_common ath ath9k_htc brcmfmac iwlmvm iwlwifi rt2x00lib rt2x00usb rt2800lib rt2800usb rtw88_8723du
+    inst_multiple -o /lib/firmware/{ath9k_htc*,brcm,iwlmvm,iwlwifi*,rt28*,rtw88*}
 }
 
 install() {
@@ -54,7 +54,7 @@ install() {
     #    cp -r /etc/NetworkManager/system-connections/*\
     #          "$initdir/etc/NetworkManager/system-connections/"
     #fi
-    instmods iwlwifi iwlmvm ath9k_htc rtw88_8723du rfkill
+    instmods cfg80211 mac80211 rfkill ath9k_common ath ath9k_htc brcmfmac iwlmvm iwlwifi rt2x00lib rt2x00usb rt2800lib rt2800usb rtw88_8723du
     # shellcheck disable=SC1004
     sed -i -e \
 '/^\[Unit\]/aDefaultDependencies=no\

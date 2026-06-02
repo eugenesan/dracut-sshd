@@ -1,11 +1,12 @@
-dracut-sshd (0.7.1-1~eugenesan~resolute8.3) resolute; urgency=medium
+dracut-sshd (0.7.1-1~eugenesan~resolute8.4) resolute; urgency=medium
 
   * Initial release
   * Add unlock-root module to make sure root user is unlocked
   * Add telegram-send module to notify bot of system reboots
   * Depend on url-lib module for curl
-  * Add netplan module to support default Ubuntu network config
-  * Add network-manager-wireless to add support for wireless networks in NetworkManager
+  * Add netplan dracut module for default Ubuntu network config
+  * Add network-manager-wireless dracut module for wireless networks in NetworkManager
+  * Add some more drivers to network-manager-wireless
   * Ubuntu specific dracut config that includes all new modules
 
  -- Eugene San (eugenesan) <eugenesan@gmail.com>  Mon, 01 Jun 2026 19:51:27 -0700
