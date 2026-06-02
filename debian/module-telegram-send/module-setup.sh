@@ -3,8 +3,6 @@
 # 2026, Eugene San (eugenesan) <eugenesan@gmail.com>
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-#!/bin/bash
-
 # check() controls if the module is included. 0 means always include.
 check() {
     return 0

@@ -1,4 +1,4 @@
-dracut-sshd (0.7.1-1~eugenesan~resolute8.4) resolute; urgency=medium
+dracut-sshd (0.7.1-1~eugenesan~resolute8.5) resolute; urgency=medium
 
   * Initial release
   * Add unlock-root module to make sure root user is unlocked
