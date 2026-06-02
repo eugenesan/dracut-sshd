@@ -33,10 +33,12 @@ ext="$(curl -s ifconfig.me)"
 message=$1
 [ -n "${message}" ] || message=$MESSAGE
 
-echo "[telegram-send]: Network host:[${name}] src:[${src}] ext:[${ext}] ready at [$(date)]."
+echo "[telegram-send]: host:[${name}] src:[${src}] ext:[${ext}] ready at [$(date)]."
 
 # Send message using curl
 curl -s -X POST "https://api.telegram.org/bot$TOKEN/sendMessage" \
     -d "chat_id=$CHAT_ID" \
     -d "text= $message @ \`host:[${name}] src:[${src}] ext:[${ext}]\`" \
     -d "parse_mode=Markdown" > /dev/null
+
+echo "[telegram-send]: message:[${message}] sent at [$(date)]."
