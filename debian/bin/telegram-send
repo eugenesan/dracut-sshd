@@ -1,12 +1,12 @@
 #!/bin/bash
 
 # Send Telegram notification using bot
-# Version 0.3
+# Version 0.4
 
-# Make sure we run only once
-[ ! -e /tmp/telegram-send.log ] || exit 0
-
+# Redirect output to log
 exec >> /tmp/telegram-send.log 2>&1
+
+# Welcome
 echo "[telegram-send] args:[${@}], started at [$(date)]"
 
 # Make sure token file is valid
@@ -21,14 +21,14 @@ if [ ! -n "${TOKEN}" ] || [ ! -n "${CHAT_ID}" ]; then
     exit 1
 fi
 
-# Wait for network
+echo "[telegram-send] Waiting for netwrok (300s)"
 if [ -x /usr/bin/nm-online ]; then
     /usr/bin/nm-online --timeout 300 > /dev/null
 elif [ -x /usr/lib/systemd/systemd-networkd-wait-online ]; then
     /usr/lib/systemd/systemd-networkd-wait-online --timeout=300
 fi
 
-# Configuration
+echo "[telegram-send] Fetching network information"
 name="$(uname -nr)"
 src="$(ip route get 1.1.1.1 | awk '{print $7; exit}')"
 dev="$(ip route get 1.1.1.1 | awk '{print $5; exit}')"

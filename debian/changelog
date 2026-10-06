@@ -1,4 +1,15 @@
-dracut-sshd (0.7.1-1~eugenesan~resolute8.7) resolute; urgency=medium
+dracut-sshd (0.7.1-2~eugenesan~resolute1) resolute; urgency=medium
+
+  * Rework debian/ structure
+    - dracut modules -> d/dracut
+    - system configs -> d/config
+    - system binaries -> d/bin
+  * Install telegram-send as system binary
+  * Fix long boot delay (300s) when booting without network by converting telegram-send module to systemd service
+
+ -- Eugene San (eugenesan) <eugenesan@gmail.com>  Tue, 06 Oct 2026 12:27:26 -0700
+
+dracut-sshd (0.7.1-1~eugenesan~resolute9.0) resolute; urgency=medium
 
   * Initial release
   * Add unlock-root module to make sure root user is unlocked

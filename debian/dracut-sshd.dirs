@@ -1,5 +1,7 @@
+usr/bin
 etc/dracut.conf.d
+usr/lib/dracut/modules.d/45netplan
 usr/lib/dracut/modules.d/46sshd
+usr/lib/dracut/modules.d/47telegram-send
 usr/lib/dracut/modules.d/82unlock-root
-usr/lib/dracut/modules.d/89telegram-send
 usr/share/doc/dracut-sshd/examples

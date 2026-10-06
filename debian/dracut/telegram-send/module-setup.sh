@@ -33,10 +33,14 @@ install() {
         return 1
     fi
 
+    # install script
+    inst_binary /usr/bin/telegram-send
+
     # install token config file
     /usr/bin/install -m 600 "$telegram_bot_token" \
             "$initdir/root/.telegram_bot"
 
-    # install hook for telegram send script
-    inst_hook initqueue/finished 89 "$moddir/telegram-send.sh"
+    # install service for telegram send script
+    inst_simple "${moddir}/telegram-send.service" "$systemdsystemunitdir/telegram-send.service"
+    systemctl -q --root "$initdir" enable telegram-send
 }

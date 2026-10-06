@@ -1,0 +1,13 @@
+[Unit]
+Description=Telegram Send daemon
+DefaultDependencies=no
+Before=cryptsetup.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/telegram-send
+Restart=always
+RestartSec=300s
+
+[Install]
+WantedBy=sysinit.target
