@@ -41,6 +41,51 @@ bundle come from dracut's own url-lib module, ip(8)/awk/grep from net-lib
 with depends(), it does not install binaries.
 
 
+If the boot hangs before the root filesystem
+--------------------------------------------
+`rd.neednet=1` is what makes this image refuse to continue without a network,
+and it is deliberate: sshd is the reason this initramfs exists, and a rescue
+shell you cannot reach is no rescue shell.  The consequence is that a machine
+whose network configuration does not match the hardware it booted on - a
+renamed interface, a different NIC, a VLAN that is not there any more - will
+not reach the root filesystem at all, and the console shows the initqueue
+retrying a hook while a job sits with no limit:
+
+    dracut-initqueue: timeout, still waiting for following initqueue hooks:
+      /var/lib/dracut/hooks/initqueue/finished/90-crypt.sh ...
+    Job dev-mapper-luks\x2d....target running (5min 23s / no limit)
+
+That is root unlock waiting, not the notification.  telegram-send does not
+appear in such a log at all; it is a separate job that gives up on its own
+(TELEGRAM_MAX_WAIT=60) and is killed by systemd if it somehow wedges
+(TimeoutStartSec=180).
+
+What to do about it, in order of preference:
+
+  * Make the configuration match the hardware.  A netplan profile with
+    `match: name: "en*"` (or a `set-name`) survives a NIC swap; a profile
+    naming one exact interface does not.
+
+  * Add a fallback so that *some* interface gets an address regardless of the
+    installed profiles: `ip=dhcp` on the kernel command line makes dracut try
+    DHCP on any interface it finds.  This is the option that makes the image
+    boot on hardware it has never seen.  Be aware it competes with netplan and
+    NetworkManager for the interface, so it is a deliberate trade rather than
+    something to add casually.
+
+  * Drop `rd.neednet=1`.  The boot then proceeds without a network - but so
+    does sshd, since nothing retries it later, so remote access is lost until
+    the next boot.  Only sensible on a machine that also boots locally.
+
+### Bisecting: rd.telegram-send=0
+If a boot misbehaves and you need to know whether this module has anything to do
+with it, add `rd.telegram-send=0` to the kernel command line.  The script then
+reads /proc/cmdline, logs "doing nothing" and exits 0 before touching the
+network, the cache or the timer.  It can be typed at the boot prompt, which
+matters because a boot that hangs is exactly the case where there is no shell to
+stop the unit from.  The unit files stay in the image; only the work is skipped.
+
+
 45netplan - netplan network configuration
 -----------------------------------------
 

@@ -8,7 +8,7 @@
 # Optional: ip(8), only for the cosmetic route/driver info.
 # Dropped vs 0.4/0.5: nm-online, systemd-networkd-wait-online, wget, awk,
 # readlink, basename, date(1), uname(1) - all replaced by bash builtins or by
-# reading /proc and /sys. Originals kept in backup/.
+# reading /proc and /sys.
 #
 # Every wait and every request is explicitly time-bounded: bash's /dev/tcp
 # cannot be interrupted and blocks for the full TCP SYN timeout (~135 s with
@@ -248,6 +248,27 @@ log "args:[$*] started at [$(now)]"
 
 # ----------------------------------------------------------------- config ---
 
+# Kill switch, read from the running kernel's command line rather than from the
+# environment: rd.telegram-send=0 makes the script exit before it touches
+# anything else. It exists for the situation where the boot itself is the bug and
+# there is no shell yet from which to stop the unit - which is exactly when you
+# need to know whether this script is involved. Exit 0, not an error: being
+# disabled is not a failure, and a non-zero code would just add noise to the boot
+# log you are trying to read.
+#
+# Parsed with a read loop over /proc/cmdline, no external tools, matching the
+# rest of the file.
+# Read in this shell, not in a command substitution: $( read ... ) would set
+# _cmdline in a subshell and the loop would see an empty list.
+_cmdline=
+read -r _cmdline </proc/cmdline 2>/dev/null || _cmdline=
+for _arg in ${_cmdline}; do
+	[ "${_arg}" = rd.telegram-send=0 ] || continue
+	log "rd.telegram-send=0 on the kernel command line, doing nothing"
+	exit 0
+done
+unset _arg _cmdline
+
 [ -r "${conf}" ] || die "no readable config ${conf} - aborting"
 # shellcheck source=/dev/null
 . "${conf}" || die "cannot parse ${conf} - aborting"
@@ -359,7 +380,7 @@ online() {
 }
 
 wait_for_net() {
-	local start=$SECONDS waited step=1 attempt=0
+	local start=$SECONDS waited step=1 attempt=0 nap remain reason
 
 	while :; do
 		if have_link; then
@@ -399,9 +420,24 @@ wait_for_net() {
 			return 1
 		fi
 
+		# The deadline is checked before the sleep, so an unclamped backoff
+		# overshoots it by a whole step - measured 63s for a 60s budget, and 15s
+		# for an 8s one. On a boot, "bounded" has to mean bounded: cap the nap
+		# at what is left of the budget. ${step} itself is left alone, so the
+		# backoff still grows for the next iteration.
+		nap=${step}
+		if [ "${maxwait}" -gt 0 ]; then
+			remain=$((maxwait - waited))
+			[ "${remain}" -gt 0 ] || {
+				log "giving up after ${waited}s: ${reason}"
+				return 1
+			}
+			[ "${remain}" -lt "${nap}" ] && nap=${remain}
+		fi
+
 		attempt=$((attempt + 1))
-		log "attempt ${attempt} (${waited}s): ${reason}, retrying in ${step}s"
-		sleep "${step}"
+		log "attempt ${attempt} (${waited}s): ${reason}, retrying in ${nap}s"
+		sleep "${nap}"
 		[ "${step}" -lt 10 ] && step=$((step * 2))
 	done
 }

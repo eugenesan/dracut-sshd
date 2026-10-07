@@ -53,11 +53,21 @@ ExecStart=/usr/bin/telegram-send
 #     Environment=TELEGRAM_CONF=/home/somebody/.telegram_bot
 #
 # How long a single run waits for the internet before handing control back. The
-# timer decides *when* we run; this only bounds one run. With the timer ticking
-# every 5min a machine without a network is effectively polled continuously:
-# that run is already waiting when the link appears, and systemd never starts a
-# second instance while one is active.
-Environment=TELEGRAM_MAX_WAIT=300
+# timer decides *when* we run; this only bounds one run.
+#
+# 60s, not 300s, and that is a boot-safety decision rather than a network one.
+# A run that waits five minutes is a five-minute job sitting in sysinit.target
+# while the initramfs is still bringing the machine up, and "the notification
+# script is still running" is not a thing anyone wants to debug during a boot
+# that is already in trouble. Nothing is lost by giving up early: the timer
+# re-arms every 5min, the cache lives on tmpfs, and a run that gives up records
+# a failed attempt, so the next tick retries and sends. The message arrives
+# within five minutes instead of one.
+#
+# With the timer ticking every 5min a machine without a network is polled
+# continuously, so a link that appears is picked up within one interval, and
+# systemd never starts a second instance while one is active.
+Environment=TELEGRAM_MAX_WAIT=60
 Environment=TELEGRAM_RETRIES=5
 # on-change (the default): the external address is looked up only on a run that
 # reports something anyway. Set to always to also notice a change of the
@@ -71,9 +81,15 @@ Environment=TELEGRAM_EXT_CHECK=on-change
 Environment=TELEGRAM_CYCLE_MAX=3
 Environment=TELEGRAM_CYCLE_WINDOW=3600
 
-# 0 = no limit: the default 90s start timeout would SIGKILL the script while
-# it is legitimately waiting for DHCP/DNS (see wait_for_net).
-TimeoutStartSec=0
+# NOT 0. The default 90s start timeout is far too short - it would SIGKILL the
+# script while it is legitimately waiting for DHCP or DNS - but "no limit" is
+# worse: it removes systemd's backstop entirely, so a run wedged on something
+# unexpected (a resolver that never answers, a read from a wedged driver) would
+# stay in sysinit.target for the whole boot with nothing able to kill it.
+#
+# Sized above TELEGRAM_MAX_WAIT=60 plus room for the send attempts, so a normal
+# run is never killed mid-flight and a genuinely stuck one is.
+TimeoutStartSec=180
 
 # No Restart= here on purpose: telegram-send.timer is the scheduler. Keeping
 # both would mean two independent reasons to run (the timer, plus a restart

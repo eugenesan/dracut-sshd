@@ -1,5 +1,38 @@
-dracut-sshd (0.7.1-4~eugenesan~resolute1) resolute; urgency=medium
+dracut-sshd (0.7.1-4~eugenesan~resolute3) resolute; urgency=medium
 
+  * telegram-send: keep the notification off the boot's critical path
+    - Add a runtime kill switch, rd.telegram-send=0 on the kernel command
+      line: the script reads /proc/cmdline, logs "doing nothing" and exits 0
+      before touching anything. A boot that hangs is exactly the case where
+      there is no shell to stop the unit from, so the bisection has to be
+      possible from the boot prompt. Deliberately a runtime check in the script
+      rather than a dracut module exclusion: module-setup.sh runs at build
+      time, where neither getargbool nor the target's command line exist
+    - Bound a single run from the outside as well as from the inside: the unit
+      had TimeoutStartSec=0, which removed systemd's backstop entirely, so a
+      run wedged on something unexpected - a resolver that never answers, a
+      read from a driver that never returns - would stay in sysinit.target for
+      the whole boot with nothing able to kill it. It is now 180s, above the
+      script's own bound, so a normal run is never killed mid-flight and a
+      stuck one is
+    - Make the wait honour its own bound. The deadline was checked before the
+      sleep, so an unclamped backoff overshot it by a whole step - measured
+      63s for a 60s budget and 15s for an 8s one. The nap is now capped at
+      what is left of the budget, so a run that promises 60s takes 60s
+    - Wait 60s for the network instead of 300s. A run that waits five minutes
+      is a five-minute job sitting in sysinit.target while the initramfs is
+      still bringing the machine up, and "the notification script is still
+      running" is not something anyone wants to debug during a boot that is
+      already in trouble. Nothing is lost by giving up early: the timer re-arms
+      every 5min, a run that gives up records a failed attempt, and the message
+      arrives within five minutes rather than one
+    - Document the failure mode of the image itself in readme.dracut-modules:
+      kernel_cmdline="rd.neednet=1", which this package ships for sshd, means a
+      machine whose network configuration does not match the hardware it booted
+      on never reaches the root filesystem, and the console shows the initqueue
+      retrying a hook while dev-mapper-luks*.target sits with no limit. That is
+      root unlock waiting, not the notification; the note also lists netplan
+      name matching, the ip=dhcp fallback and the cost of dropping rd.neednet
   * telegram-send: rework the network check and the external address, after
     testing the change detection on real boots
     - Log which provider answered. The reachability check now names the
