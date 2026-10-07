@@ -1,13 +1,99 @@
 [Unit]
-Description=Telegram Send daemon
+Description=Telegram boot notification
+Documentation=file:/usr/share/doc/dracut-sshd/README
+# Boot notification: it has to run before the root filesystem is mounted and
+# before the network stack is "officially" up, so it must not depend on the
+# regular target hierarchy.
 DefaultDependencies=no
-Before=cryptsetup.target
+# Deliberately NO Before=cryptsetup.target:
+#   Type=oneshot means the unit is still activating while the script waits for
+#   the network, so any ordering constraint against a real target blocks
+#   root-unlock for up to TELEGRAM_MAX_WAIT seconds on a machine without
+#   internet. The notification must never be on the critical boot path.
+#
+#   If you *do* want "message sent before root unlock", add:
+#       Before=cryptsetup.target
+#   ...and keep TELEGRAM_MAX_WAIT low, so the worst case stays bounded.
+#
+# If the token file is missing, skip silently instead of failing the boot.
+# Comment it out to debug a broken token: the unit then runs, the script logs
+# "no readable config ..." to TELEGRAM_LOG, and exits 1.
+ConditionPathExists=/root/.telegram_bot
+
+# telegram-send.timer is the scheduler (every 5min). The default start limit
+# (5 starts per 100s) cannot be reached with that interval; disabled
+# explicitly so it can never silently stop the notifications.
+StartLimitIntervalSec=0
 
 [Service]
-Type=simple
+# oneshot, not simple: the script runs, sends one message and exits.
+# Type=simple + Restart=always would be wrong twice over - systemd forbids
+# Restart=always/on-success for oneshot units, and it would re-send the
+# notification on every tick anyway.
+#
+# NOT RemainAfterExit=yes: the unit would then stay "active (exited)" forever,
+# and telegram-send.timer's OnUnitActiveSec= (which is relative to the unit's
+# last activation) would never fire a second time. Leaving the unit inactive
+# after each run is what makes the timer re-arm.
+Type=oneshot
+
 ExecStart=/usr/bin/telegram-send
-Restart=always
-RestartSec=300s
+
+# No TELEGRAM_LOG, TELEGRAM_STATE or TELEGRAM_CONF here on purpose: the script
+# picks a writable runtime directory itself ($TELEGRAM_RUN_DIR, then
+# $XDG_RUNTIME_DIR = /run/user/<uid>, then /run when writable, then /tmp) and
+# reads the token from $HOME. So this unit works unchanged as a system unit
+# (root: /run/telegram-send.log and /root/.telegram_bot) and as a user unit,
+# where systemd sets XDG_RUNTIME_DIR and HOME for you.
+#
+# For a *system* unit that runs as a user - User=somebody - neither variable is
+# set, so override it with a drop-in:
+#     systemctl edit telegram-send
+#     [Service]
+#     Environment=TELEGRAM_CONF=/home/somebody/.telegram_bot
+#
+# How long a single run waits for the internet before handing control back. The
+# timer decides *when* we run; this only bounds one run. With the timer ticking
+# every 5min a machine without a network is effectively polled continuously:
+# that run is already waiting when the link appears, and systemd never starts a
+# second instance while one is active.
+Environment=TELEGRAM_MAX_WAIT=300
+Environment=TELEGRAM_RETRIES=5
+# on-change (the default): the external address is looked up only on a run that
+# reports something anyway. Set to always to also notice a change of the
+# external address on its own, at the cost of one third-party request per tick.
+Environment=TELEGRAM_EXT_CHECK=on-change
+
+# Link-cycle reports are capped, so a flapping cable cannot turn into a
+# message per tick. The cap only applies when the cycle is the sole reason to
+# report: the initial status and any real change of the network identity always
+# get through. 0 keeps the detection but never notifies on a cycle.
+Environment=TELEGRAM_CYCLE_MAX=3
+Environment=TELEGRAM_CYCLE_WINDOW=3600
+
+# 0 = no limit: the default 90s start timeout would SIGKILL the script while
+# it is legitimately waiting for DHCP/DNS (see wait_for_net).
+TimeoutStartSec=0
+
+# No Restart= here on purpose: telegram-send.timer is the scheduler. Keeping
+# both would mean two independent reasons to run (the timer, plus a restart
+# after every failure) and a chance of two notifications close together.
+#
+# The exit codes stay meaningful for the journal and for the log:
+#   0   delivered
+#   75  no internet within TELEGRAM_MAX_WAIT - the timer tries again shortly
+#   1   permanent (no/bad token, API rejected the message) - retried on the next
+#       tick like everything else, but logged loudly
+
+# The script redirects stdout/stderr to $TELEGRAM_LOG; anything the kernel or
+# systemd says about the unit itself still goes to the journal.
+SyslogIdentifier=telegram-send
+StandardOutput=journal
+StandardError=journal
+
+# Harmless hardening that does not need mount namespaces (so it is safe this
+# early in boot).
+NoNewPrivileges=yes
 
 [Install]
 WantedBy=sysinit.target

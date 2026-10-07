@@ -1,3 +1,136 @@
+dracut-sshd (0.7.1-4~eugenesan~resolute1) resolute; urgency=medium
+
+  * telegram-send: rework the network check and the external address, after
+    testing the change detection on real boots
+    - Log which provider answered. The reachability check now names the
+      endpoint that confirmed the network on every run instead of only after a
+      failure, and the external address lookup names the service it used, so
+      "ext is unknown today" can be told apart from "that service is down"
+    - Actually rotate the reachability endpoints between runs. The counter
+      started at zero and every run is a new process, so netchecks[0] answered
+      every single time and the other five were dead weight on a healthy
+      machine; it is now seeded randomly, and kept only so that a failing check
+      moves on to the next endpoint within one run
+    - Look the external address up once per run. Under
+      TELEGRAM_EXT_CHECK=always gather_netinfo() runs twice, and the second
+      call both repeated the request and cleared the value the first one had
+      fetched, so the report path saw "unknown" and needlessly fell back to the
+      cached address
+    - Ask every external address endpoint for the address family of our own
+      source address. On a dual-stack machine different operators answer with
+      different families for the same host (api.ipify.org and
+      checkip.amazonaws.com return IPv4, ifconfig.me, icanhazip.com and
+      ident.me IPv6), so rotating between them flipped the field between v4
+      and v6, the comparison read that as a change, and a dual-stack machine
+      would have notified every few ticks about nothing
+    - Report the last known external address in the log on a run that did not
+      look it up, rather than printing "unknown" and making a working lookup
+      look broken; likewise on a run that does report, a lookup that fails now
+      keeps the cached value instead of replacing it with "unknown"
+    - Query seven endpoints belonging to seven different operators
+      (api.ipify.org, ifconfig.me/ip, checkip.amazonaws.com, icanhazip.com,
+      ident.me, wtfismyip.com/text, ipinfo.io/ip), starting at a different one
+      on every run, and accept a reply only if it really is a bare address, so
+      an error page, a redirect or a captive portal can never reach the message
+    - Notice the link being cycled, not just the addresses changing, and use
+      it as the trigger for looking the external address up. Two free sysfs
+      signals are recorded with the rest of the cache:
+      carrier_down_count (carrier_changes on an older kernel), the kernel's
+      tally of link losses, and statistics/rx_packets, which can only decrease
+      if the interface was destroyed and recreated. The usual way an unattended
+      machine ends up with a new external address is a router reboot, and that
+      leaves interface, driver and source address untouched - routers hand the
+      same address to the same MAC - so without these the new public address
+      went unnoticed until something else changed too. Only a loss or a
+      decrease counts, never growth, so a busy link does not turn into a
+      request per tick. A detected cycle is reported in its own right, with or
+      without an address change - the same router usually hands out the same
+      address again, so requiring a difference would mean never reporting it -
+      and the reason is added to the message as link:[...]; one cycle means one
+      message, because the new counters are recorded with the attempt. Being
+      read from the kernel alone, cycle detection is unaffected by
+      TELEGRAM_SEND_IP=0, so cycling the link - from the far end of the cable,
+      or by rebooting the router - forces a fresh status message whatever state
+      the last attempt left behind
+    - Rate limit those cycle-triggered messages to TELEGRAM_CYCLE_MAX (3) per
+      TELEGRAM_CYCLE_WINDOW (3600s) seconds, counted over a rolling window so a
+      burst across a boundary cannot double the allowance. Only a cycle that is
+      the sole reason to report is ever suppressed: the initial status and any
+      real change of interface, driver, address or message always get through,
+      and TELEGRAM_CYCLE_MAX=0 keeps the detection but never notifies on it.
+      This cap, not the timer's 5min interval, is what bounds how many messages
+      a fault produces; the interval only decides how soon a change is noticed,
+      and how long somebody pulling the cable has to wait for a status refresh
+    - Treat the external address as advisory: a failed lookup reports "unknown"
+      and never counts as a change, the last known value is kept instead of
+      being overwritten, and a lookup happens only on a run that reports
+      something anyway or the link cycled (TELEGRAM_EXT_CHECK=on-change, the
+      default) - so a machine whose network is quiet asks no IP-echo service at
+      all. "always" restores detection of an external-address-only change with
+      no local sign at all, at one request per tick
+    - Skip the send when the interface or source address is unknown, rather
+      than reporting an empty identity and overwriting a good cache entry
+    - Put the log and the state cache in one runtime directory chosen at
+      runtime - $TELEGRAM_RUN_DIR, then $XDG_RUNTIME_DIR (/run/user/<uid>),
+      then /run when writable, then /tmp with the uid in the filename - so the
+      script works for a regular user as well, and dropped the hardcoded /run
+      paths and /root/.telegram_bot from the unit, which now works unchanged
+      as a system unit and as a user unit
+  * Ship debian/readme.dracut-modules.txt in the package documentation, so the
+    netplan, network-manager-wireless, telegram-send and unlock-root modules
+    are documented where an installed system can be read
+  * debian/config/sshd.conf: add tail(1) to install_items, for following the
+    telegram-send log from a rescue shell. No dracut module installs it -
+    80base provides readlink and sleep, but not tail
+
+ -- Eugene San (eugenesan) <eugenesan@gmail.com>  Tue, 06 Oct 2026 17:30:31 -0700
+
+dracut-sshd (0.7.1-3~eugenesan~resolute3) resolute; urgency=medium
+
+  * telegram-send: rewrite to fix a silent hang when booting without network
+    - Replace the uninterruptible /dev/tcp probe (~135s per attempt) with
+      bounded curl probes, add a bounded wait with logged retries, retry and
+      verify delivery, and escape/encode the message so it is no longer
+      dropped by HTTP 400
+    - Drop nm-online, wait-online, wget, awk, readlink, basename, date and
+      uname; depend on the url-lib module for curl and the CA bundle
+    - Make the module skip cleanly when no token is configured instead of
+      failing the dracut run
+    - Run the notification as a one-shot unit: it is no longer resent on a
+      timer, is not killed by the 90s start timeout, and no longer blocks root
+      unlock while waiting for the network
+    - Drive the repeat with a new telegram-send.timer (OnBootSec=5min,
+      OnUnitActiveSec=5min) instead of Restart=: systemd does not allow
+      Restart=always/on-success for oneshot units, so a repeating one-shot
+      needs a timer. RemainAfterExit=yes had to go as well, because it keeps
+      the unit "active (exited)" and OnUnitActiveSec would then never re-arm
+    - Notify only on a real change: cache the last attempt and the network
+      identity (interface, driver, source and external address, plus the
+      message) in /run/telegram-send.state, so a tick that finds nothing new
+      sends nothing. The cache lives on tmpfs, so the first run after every
+      reboot still notifies, and a recorded failure always forces a retry. A
+      failed wait is recorded with an empty identity, so a network that returns
+      unchanged after an outage is still reported once
+    - Probe a rotating list of public connectivity endpoints (Microsoft NCSI,
+      Google gstatic, Apple, Ubuntu, Cloudflare, Amazon) before the Bot API,
+      and only ask api.telegram.org when all of them fail: a healthy machine no
+      longer polls Telegram just to find out that it has internet, and six
+      providers decide the answer instead of one
+    - Rotate optional pinned api.telegram.org addresses through --resolve
+      while keeping DNS authoritative, and let the send fall back to them only
+      when the resolver itself failed (curl rc=6)
+    - Exit 75 (EX_TEMPFAIL) when the internet does not appear within
+      TELEGRAM_MAX_WAIT, so the unit retries on that but not on permanent
+      errors
+    - Add telegram-send to add_dracutmodules so the module is included
+  * debian/config/sshd.conf: drop readlink, basename, date and ifconfig from
+    install_items - readlink and sleep already come from dracut's 80base
+    module, ip(8) from 45net-lib, and nothing in the image uses the rest
+  * Add debian/readme.dracut-modules.txt documenting the netplan,
+    network-manager-wireless, telegram-send and unlock-root modules
+
+ -- Eugene San (eugenesan) <eugenesan@gmail.com>  Tue, 06 Oct 2026 14:17:17 -0700
+
 dracut-sshd (0.7.1-2~eugenesan~resolute1) resolute; urgency=medium
 
   * Rework debian/ structure

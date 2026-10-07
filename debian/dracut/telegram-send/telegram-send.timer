@@ -1,0 +1,58 @@
+[Unit]
+Description=Check every 5min whether the Telegram notification is still current
+Documentation=file:/usr/share/doc/dracut-sshd/README
+# Same reasoning as telegram-send.service: this runs inside the initramfs, so it
+# must not inherit the regular target ordering. WantedBy=sysinit.target below
+# is what actually starts it early.
+DefaultDependencies=no
+
+[Timer]
+Unit=telegram-send.service
+
+# Monotonic on purpose. OnCalendar= would be tied to the wall clock, and the
+# initramfs regularly boots long before the RTC has been read, so the first
+# elapse would land at an arbitrary time (or be skipped entirely).
+#
+# OnBootSec         first check this long after boot. It overlaps
+#                    TELEGRAM_MAX_WAIT in the service on purpose: if the network
+#                    is not up yet, that run is already waiting for it and will
+#                    send the moment it appears.
+# OnUnitActiveSec   re-arm after every run, successful, failed or skipped - that
+#                    is what lets a *later* change (new address, different
+#                    interface) be noticed at all.
+#
+# The service is a check, not a heartbeat: it compares the network identity
+# (dev/driver/src/ext) and the message against the last attempt recorded in
+# TELEGRAM_STATE and sends nothing when neither changed. So this tick is the
+# *resolution* of the change detection, not the message rate - the boot
+# notification always goes out (the cache lives on tmpfs, so it is empty after
+# every reboot) and after that there is one message per real change.
+#
+# 5min is also how long a change, or somebody pulling the cable to ask for a
+# status refresh, can go unnoticed. Going shorter is now cheap in messages: the
+# link-cycle reports are capped separately, at 3 per hour, so a flapping cable
+# cannot turn a short interval into a flood. It is not free, though - each tick
+# costs one reachability probe to a connectivity endpoint, so 2min would double
+# that traffic to buy a smaller delay.
+#
+# Tighten to notice changes faster, loosen to cut wakeups; the number of
+# messages is unaffected either way.
+#
+# TELEGRAM_MAX_WAIT in the service is a separate thing and stays at 300s: how
+# long one run waits for the network to appear, not how often runs repeat.
+#
+# To go back to a single boot-time notification, delete this timer (the module
+# installs it as telegram-send.timer; the service alone is harmless).
+OnBootSec=5min
+OnUnitActiveSec=5min
+
+# Timer accuracy. systemd batches timer wakeups anyway, so a 5min interval can
+# legitimately fire up to AccuracySec late.
+AccuracySec=30s
+
+# No catch-up burst after a long suspend: one fresh notification, not a
+# backlog. (This is the default, stated so it is not "fixed" by accident.)
+Persistent=false
+
+[Install]
+WantedBy=sysinit.target

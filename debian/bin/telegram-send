@@ -1,51 +1,891 @@
 #!/bin/bash
 
-# Send Telegram notification using bot
-# Version 0.4
+# Send Telegram notification using bot, as soon as the internet is reachable
+# Version 0.6 - initramfs/initrd friendly (no nm-online, no wait-online, no
+# network stack of its own, single long-lived process).
+#
+# Hard dependencies: bash (>= 4.2, for printf '%(...)T') + curl.
+# Optional: ip(8), only for the cosmetic route/driver info.
+# Dropped vs 0.4/0.5: nm-online, systemd-networkd-wait-online, wget, awk,
+# readlink, basename, date(1), uname(1) - all replaced by bash builtins or by
+# reading /proc and /sys. Originals kept in backup/.
+#
+# Every wait and every request is explicitly time-bounded: bash's /dev/tcp
+# cannot be interrupted and blocks for the full TCP SYN timeout (~135 s with
+# the default tcp_syn_retries=6), which is what made 0.5 hang silently on a
+# carrier-up-but-no-route interface.
+#
+# Environment knobs:
+#   TELEGRAM_CONF      token file            (default ${HOME:-/root}/.telegram_bot)
+#   TELEGRAM_RUN_DIR   directory for the log and the state cache
+#                      (default $XDG_RUNTIME_DIR, else /run if writable, else
+#                      /tmp - see the settings section)
+#   TELEGRAM_LOG       log file              (default <run dir>/telegram-send.log)
+#   TELEGRAM_STATE     change-detection cache (default <run dir>/telegram-send.state)
+#   TELEGRAM_MAX_WAIT  seconds to wait for the internet, 0 = forever (default 300)
+#   TELEGRAM_RETRIES   send attempts once the link is up          (default 5)
+#   TELEGRAM_SEND_IP   0 = drop the external address entirely    (default 1)
+#   TELEGRAM_EXT_CHECK on-change (default) or always: when to look the external
+#                      address up - on-change watches the identity plus carrier
+#                      losses and a receive counter that went backwards. See the
+#                      settings section.
+#   TELEGRAM_CYCLE_MAX cycle-only notifications allowed per window (default 3,
+#                      0 = detect but never notify on a cycle)
+#   TELEGRAM_CYCLE_WINDOW length of that window in seconds   (default 3600)
+#
+# Not a heartbeat: with TELEGRAM_STATE the script remembers the network
+# identity and the outcome of the last attempt, and skips the send when neither
+# changed. A unit that re-runs it every few minutes then costs one message per
+# real change (new interface, driver, address, external IP, or a failed attempt
+# to notify) instead of one per tick. The cache lives next to the log in a
+# runtime directory, so it is empty after every reboot and the first run of a
+# boot always notifies.
+#
+# The external address is advisory, because it is the one field that comes from
+# a third party: a lookup that fails reports "unknown" and never counts as a
+# change, so a flaky service cannot cause a message storm.
+#
+# Exit status: 0 only when Telegram confirmed the message ("ok":true).
+#
+#   0   message delivered
+#   1   permanent failure (no/bad token, API rejected the message) - the unit
+#       must not retry this, or a typo in the token file would re-notify
+#       forever
+#  75   EX_TEMPFAIL: no internet within TELEGRAM_MAX_WAIT - worth retrying, the
+#       unit runs the script again (telegram-send.timer) and it waits afresh
 
-# Redirect output to log
-exec >> /tmp/telegram-send.log 2>&1
+# --------------------------------------------------------------- helpers ----
 
-# Welcome
-echo "[telegram-send] args:[${@}], started at [$(date)]"
+now() { printf '%(%Y-%m-%d %H:%M:%S)T' -1; }
+# Same clock, as a number, for the arithmetic the cycle rate limit needs.
+epoch() { printf '%(%s)T' -1; }
+log() { printf '[telegram-send] %s\n' "$*"; }
+# Kernel counters are numbers, but they arrive from a file: refuse anything else
+# before it reaches [ ... -gt ], where a stray value is a syntax error that
+# would kill the run instead of merely skipping the check.
+isnum() { case ${1} in "" | *[!0-9]*) return 1 ;; *) return 0 ;; esac; }
+die() { log "$*"; exit 1; }
 
-# Make sure token file is valid
-telegram_bot_token=~/.telegram_bot
-if [ ! -r "$telegram_bot_token" ]; then
-    echo "[telegram-send] No .telegram_bot config found! Aborting"
-    exit 1
+# Temporary failure: whatever is missing may still show up (a network that comes
+# up late, a machine that sat waiting at the encryption prompt), so exit with
+# EX_TEMPFAIL and let the unit decide whether to run us again.
+retry_later() { log "$*"; exit 75; }
+
+# Escape the four characters Telegram's legacy "Markdown" mode treats as
+# markup, so that an arbitrary message can never turn into a 400 API error.
+escape_md() {
+	local s=$1 out='' c i
+	for ((i = 0; i < ${#s}; i++)); do
+		c=${s:i:1}
+		case ${c} in
+			_ | '*' | '`' | '[') out+="\\${c}" ;;
+			*) out+="${c}" ;;
+		esac
+	done
+	printf '%s' "${out}"
+}
+
+# --------------------------------------------------------------- settings ---
+
+# $HOME is usually unset for system units in the initramfs, hence the /root
+# fallback (which is also where the dracut module installs the token).
+conf=${TELEGRAM_CONF:-${HOME:-/root}/.telegram_bot}
+maxwait=${TELEGRAM_MAX_WAIT:-300}
+retries=${TELEGRAM_RETRIES:-5}
+sendip=${TELEGRAM_SEND_IP:-1}
+
+# TELEGRAM_EXT_CHECK decides when the external address is looked up:
+#   on-change (default) only when something *local* suggests it may have changed:
+#                the interface, driver, source address or message differ from
+#                the last recorded one, or the link was cycled since then
+#                (carrier losses, or a receive counter that went backwards).
+#                A machine whose network is quiet therefore makes *no* request at
+#                all, which is the point: this field is the only one that needs a
+#                third party, so it is also the only one that can fail for
+#                reasons unrelated to this machine.
+#
+#                Those link signals are what make the mode usable rather than
+#                merely cheap. The usual way an unattended machine ends up with
+#                a new external address is a router reboot, and that leaves
+#                dev, driver and source address untouched - routers hand the same
+#                address to the same MAC - so without them a changed public
+#                address after a reboot would go unnoticed until something else
+#                changed too.
+#   always          on every run, which also catches an external address that
+#                  changes with no local sign at all (an upstream NAT rebinding,
+#                  say). One request per tick - 288/day at the shipped 5min
+#                  interval.
+extcheck=${TELEGRAM_EXT_CHECK:-on-change}
+
+# Rate limit for the notifications a link cycle triggers on its own. The point
+# of reporting a cycle is that it is rare and worth knowing about; a flapping
+# cable, a switch that reboots in a loop or wifi roaming would otherwise produce
+# one message per tick. cyclemax of them per cyclewindow seconds, counted over a
+# rolling window rather than a fixed one, so a burst across a window boundary
+# cannot double the allowance.
+#
+# Only cycle-only reports count. The initial status - the boot notification, or
+# any real change of interface, driver, address or message - is never limited:
+# a machine that is simply rebooting always gets its one message, and a genuine
+# network change is never suppressed because the cable is flapping at the same
+# time. Setting cyclemax=0 keeps the detection but stops it from ever notifying.
+cyclemax=${TELEGRAM_CYCLE_MAX:-3}
+cyclewindow=${TELEGRAM_CYCLE_WINDOW:-3600}
+
+# Where the log and the state cache live: one directory, picked so the same
+# script works for root inside an initramfs and for an unprivileged user.
+#   1. $TELEGRAM_RUN_DIR        explicit override
+#   2. $XDG_RUNTIME_DIR         /run/user/<uid> - set by systemd for user units
+#                               and by pam_systemd at login, so a regular user
+#                               never has to care about paths
+#   3. /run                     writable by root, tmpfs in an initramfs
+#   4. /tmp                     last resort; the name is suffixed with the uid
+#                               so two users cannot fight over the same file
+suffix=
+if [ -n "${TELEGRAM_RUN_DIR:-}" ]; then
+	runtimedir=${TELEGRAM_RUN_DIR}
+elif [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -w "${XDG_RUNTIME_DIR}" ]; then
+	runtimedir=${XDG_RUNTIME_DIR}
+elif [ -w /run ]; then
+	runtimedir=/run
+else
+	runtimedir=/tmp
+	suffix=".${EUID}"
 fi
-. "$telegram_bot_token"
-if [ ! -n "${TOKEN}" ] || [ ! -n "${CHAT_ID}" ]; then
-    echo "[telegram-send] No valid telegram_bot token or chat_id! Aborting"
-    exit 1
-fi
 
-echo "[telegram-send] Waiting for netwrok (300s)"
-if [ -x /usr/bin/nm-online ]; then
-    /usr/bin/nm-online --timeout 300 > /dev/null
-elif [ -x /usr/lib/systemd/systemd-networkd-wait-online ]; then
-    /usr/lib/systemd/systemd-networkd-wait-online --timeout=300
-fi
+logfile=${TELEGRAM_LOG:-${runtimedir}/telegram-send${suffix}.log}
+state=${TELEGRAM_STATE:-${runtimedir}/telegram-send${suffix}.state}
 
-echo "[telegram-send] Fetching network information"
-name="$(uname -nr)"
-src="$(ip route get 1.1.1.1 | awk '{print $7; exit}')"
-dev="$(ip route get 1.1.1.1 | awk '{print $5; exit}')"
-drv="$(basename "$(readlink -f "/sys/class/net/${dev}/device/driver")")"
+# Addresses used to reach api.telegram.org, rotated through by online(): one
+# entry per probe attempt. An EMPTY entry means "let DNS decide", i.e. the
+# normal path - and it stays authoritative, because a --resolve list replaces
+# the resolver's answer rather than adding to it.
+#
+# The non-empty entries are fallbacks for the two situations DNS cannot fix: a
+# resolver that is not answering yet, and an A record that routes nowhere
+# (filtered route, stale record). The hostname, TLS SNI and the certificate
+# check are untouched, so a success through a fallback still proves we reached
+# the real API - and curl falls through the list inside a single call, measured
+# here with a blackholed address listed first (0.75s to the working one).
+#
+# They go stale: Telegram rotates addresses, and the record observed while
+# writing this (149.154.166.110) is not in the ranges usually quoted for the
+# API. A stale entry only costs one failed attempt inside the same --max-time
+# budget, so refresh them with:
+#     getent ahostsv4 api.telegram.org
+# Overridable in the token file, e.g.  apiaddrs=("" "1.2.3.4")
+apiaddrs=(
+	""
+	"149.154.166.110"
+)
 
-ext="$(curl -s ifconfig.me)"
+# Which entry online() tries next. Not a knob: internal round-robin position.
+apiprobe=0
 
-# Read default message from token file if no argument is given
+# Cheap reachability checks, one per attempt, rotated by netcheck(). These are
+# the connectivity-check endpoints the big providers run for exactly this
+# purpose (Microsoft NCSI, Google gstatic, Apple, Ubuntu, Cloudflare, Amazon):
+# tiny answers, spread over six providers, so no single filtered or captive
+# destination decides the answer.
+#
+# Every entry is a *name*, on purpose: a successful answer therefore proves
+# reachability AND that the resolver works, which is what the send needs. (An
+# address literal such as https://1.1.1.1 would answer with DNS down, but it
+# says nothing about the resolver, and DNS being down is precisely the case the
+# send cannot survive unaided - there, online()'s pinned addresses are what save
+# the notification, not this list.)
+#
+# The first four are plain HTTP, so they still answer when the CA bundle is
+# missing - exactly when we want to know that *something* works.
+#
+# api.telegram.org is deliberately NOT in this list. Polling the Bot API every
+# few minutes to answer "is there internet" is pointless load on someone else's
+# service (and at this cadence nowhere near their limits - roughly 0.003
+# requests/second), and it answers a question these answer better. Telegram is
+# checked separately, by online(), only when all of them fail.
+netchecks=(
+	"http://www.msftncsi.com/ncsi.txt"
+	"http://gstatic.com/generate_204"
+	"http://apple.com"
+	"http://ubuntu.com"
+	"https://one.one.one.one/"
+	"https://amazon.com"
+)
+# RANDOM, not 0: each run is a new process, so a counter initialised to zero
+# always starts at netchecks[0] and the other five endpoints were never used on
+# a healthy machine - one provider decided every answer. The counter is still
+# needed *within* a run, so that a failing check moves on to the next endpoint
+# instead of retrying the same dead one. The guard keeps RANDOM % 0 - a division
+# by zero - out of the picture if the list is ever emptied.
+netcheckidx=0
+[ "${#netchecks[@]}" -gt 0 ] && netcheckidx=$((RANDOM % ${#netchecks[@]}))
+netcheckurl=
+
+# Endpoints for the external address (see gatherext). Each must answer with the
+# bare address and nothing else; they are walked in a different order per run.
+#
+# Seven endpoints, seven operators: with a random start and a falling-through
+# loop, one service being down, slow or rate limiting costs a few extra seconds
+# rather than the whole lookup, and no operator ever sees every query. All of
+# these were checked to answer with a bare address and nothing else; keep it
+# that way when editing, because the validation in gatherext() rejects anything
+# else. Cost is normally one request per run that has something to report - see
+# TELEGRAM_EXT_CHECK - not one per tick.
+exturls=(
+	"https://api.ipify.org"
+	"https://ifconfig.me/ip"
+	"https://checkip.amazonaws.com"
+	"https://icanhazip.com"
+	"https://ident.me"
+	"https://wtfismyip.com/text"
+	"https://ipinfo.io/ip"
+)
+
+# Everything (curl errors included) goes to the log, which is also the only
+# way to see why we are still waiting.
+exec >>"${logfile}" 2>&1
+log "args:[$*] started at [$(now)]"
+
+# ----------------------------------------------------------------- config ---
+
+[ -r "${conf}" ] || die "no readable config ${conf} - aborting"
+# shellcheck source=/dev/null
+. "${conf}" || die "cannot parse ${conf} - aborting"
+[ -n "${TOKEN}" ] || die "no TOKEN in ${conf} - aborting"
+[ -n "${CHAT_ID}" ] || die "no CHAT_ID in ${conf} - aborting"
+
+# ------------------------------------------------------------ link & probe --
+
+# Any interface with a carrier, loopback excluded. Unlike a check for
+# /sys/class/net/*/device this also covers veth/tun/tap/wireguard, and it
+# does not care whether an address or a route has been configured yet.
+have_link() {
+	local d carrier state
+	for d in /sys/class/net/*; do
+		[ -d "${d}" ] || continue
+		[ "${d##*/}" = lo ] && continue
+		if [ -r "${d}/carrier" ]; then
+			IFS= read -r carrier <"${d}/carrier" || continue
+			[ "${carrier}" = 1 ] && return 0
+		elif [ -r "${d}/operstate" ]; then
+			IFS= read -r state <"${d}/operstate" || continue
+			[ "${state}" = up ] && return 0
+		fi
+	done
+	return 1
+}
+
+# Cheap first-stage reachability check, one URL per call (see netchecks above).
+#
+# No --fail on purpose: any HTTP answer at all - including a captive portal
+# redirect - means there is a network to send over, and the send itself is what
+# decides whether Telegram is actually usable.
+# netcheckurl is the endpoint that answered, for the log line below; the failure
+# text in netcheck_err names the one that did not.
+netcheck_err=
+netcheckurl=
+netcheck() {
+	local out rc url=${netchecks[${netcheckidx}]}
+
+	netcheckidx=$(((netcheckidx + 1) % ${#netchecks[@]}))
+	netcheckurl=${url}
+
+	out=$(curl --silent --show-error --output /dev/null \
+		--connect-timeout 3 --max-time 6 "${url}" 2>&1)
+	rc=$?
+
+	if [ ${rc} -eq 0 ]; then
+		netcheck_err=
+		return 0
+	fi
+
+	netcheck_err="${url} curl rc=${rc} ${out//$'\n'/ | }"
+	return 1
+}
+
+# All non-empty entries as one comma-separated --resolve list, or nothing when
+# the list holds no fallbacks. Used for the send, where DNS is tried first and
+# these only come into play when the resolver itself is what failed.
+apipinned() {
+	local a list=''
+
+	for a in "${apiaddrs[@]}"; do
+		[ -n "${a}" ] || continue
+		list="${list:+${list},}${a}"
+	done
+
+	[ -n "${list}" ] || return 1
+	printf '%s' "${list}"
+}
+
+# Bounded connectivity probe against the Telegram API itself: no third-party
+# host, and a success proves DNS + route + TLS to the very endpoint we are
+# about to use. Every timeout is explicit on purpose - curl's own defaults
+# (300 s connect timeout, no total timeout) are exactly what turns a dead
+# link into a silent hang.
+#
+# No --fail on purpose: any HTTP answer (even 401 for a bad token) means the
+# network works. Token problems are reported by the send below.
+#
+# probe_err carries curl's own diagnosis (DNS? route? missing CA bundle?) into
+# the wait log - invaluable inside an initramfs.
+probe_err=
+probeurl=
+online() {
+	local out rc target=${apiaddrs[${apiprobe}]}
+
+	apiprobe=$(((apiprobe + 1) % ${#apiaddrs[@]}))
+
+	if [ -n "${target}" ]; then
+		out=$(curl --silent --show-error --output /dev/null \
+			--connect-timeout 3 --max-time 8 \
+			--resolve "api.telegram.org:443:${target}" \
+			"https://api.telegram.org/bot${TOKEN}/getMe" 2>&1)
+	else
+		out=$(curl --silent --show-error --output /dev/null \
+			--connect-timeout 3 --max-time 8 \
+			"https://api.telegram.org/bot${TOKEN}/getMe" 2>&1)
+	fi
+	rc=$?
+
+	if [ ${rc} -eq 0 ]; then
+		probe_err=
+		probeurl=api.telegram.org${target:+ (pinned ${target})}
+		return 0
+	fi
+
+	probe_err="curl rc=${rc} via ${target:-dns} ${out//$'\n'/ | }"
+	return 1
+}
+
+wait_for_net() {
+	local start=$SECONDS waited step=1 attempt=0
+
+	while :; do
+		if have_link; then
+			# Cheap provider-diverse check first, so a healthy machine never
+			# touches the Bot API just to find out that it has internet.
+			# Telegram is only asked when all four of those fail.
+			# Logged unconditionally, not only after a failure: which of the
+			# providers answered is the one thing an initramfs log cannot
+			# tell you otherwise, and "the network is fine, this operator
+			# confirmed it" is what makes the rotation legible afterwards.
+			if netcheck; then
+				if [ "${attempt}" -gt 0 ]; then
+					log "internet reachable after ${waited}s (${attempt} failed attempts, confirmed by ${netcheckurl})"
+				else
+					log "internet reachable (confirmed by ${netcheckurl})"
+				fi
+				return 0
+			fi
+
+			if online; then
+				if [ "${attempt}" -gt 0 ]; then
+					log "internet reachable after ${waited}s (${attempt} failed attempts, ${netcheck_err}, confirmed by ${probeurl})"
+				else
+					log "internet reachable (confirmed by ${probeurl})"
+				fi
+				return 0
+			fi
+
+			reason="carrier up, but nothing reachable: ${netcheck_err} | telegram: ${probe_err}"
+		else
+			reason="no interface with carrier yet"
+		fi
+
+		waited=$((SECONDS - start))
+		if [ "${maxwait}" -gt 0 ] && [ "${waited}" -ge "${maxwait}" ]; then
+			log "giving up after ${waited}s: ${reason}"
+			return 1
+		fi
+
+		attempt=$((attempt + 1))
+		log "attempt ${attempt} (${waited}s): ${reason}, retrying in ${step}s"
+		sleep "${step}"
+		[ "${step}" -lt 10 ] && step=$((step * 2))
+	done
+}
+
+# ------------------------------------------------------- network metadata ---
+
+# Everything below is read from /proc, /sys and `ip route get`, parsed in
+# pure bash. Output: host, kernel, src, dev, drv, ext.
+#
+# $1: 1 = also resolve the external address, 0 = leave it unknown. The caller
+# decides, because that lookup is the only field needing a third party and the
+# only one that can fail for reasons unrelated to this machine (see gatherext).
+gather_netinfo() {
+	local line tok prev f
+
+	# nodename is the full name; hostname is the (possibly truncated)
+	# legacy one. Not every /proc/sys/kernel tree exposes both. Neither has a
+	# trailing newline, hence read -r and the emptiness check rather than $(<).
+	host= kernel=
+	for f in /proc/sys/kernel/nodename /proc/sys/kernel/hostname; do
+		[ -r "${f}" ] || continue
+		IFS= read -r host <"${f}"
+		[ -n "${host}" ] && break
+	done
+	[ -r /proc/sys/kernel/osrelease ] &&
+		IFS= read -r kernel </proc/sys/kernel/osrelease
+	[ -n "${kernel}" ] || kernel=unknown
+
+	src= dev= drv=
+
+	# Cleared only when this run has not resolved it yet. gather_netinfo() is
+	# called twice under TELEGRAM_EXT_CHECK=always (up front, and again on the
+	# path that reports); clearing unconditionally threw away the answer the
+	# first call had just fetched, so the report path saw "unknown" and fell
+	# back to the cached value it did not need.
+	[ "${extdone}" -eq 0 ] && ext=unknown
+
+	if command -v ip >/dev/null; then
+		# "1.1.1.1 via 10.33.112.73 dev wlp2s0 src 10.33.112.16 uid 1000"
+		# "1.1.1.1 dev eth0 src 10.0.0.5 uid 0"   (direct route, no gateway)
+		# Parse keyword/value pairs: iproute2 is free to reorder or add words.
+		while read -r line || [ -n "${line}" ]; do
+			prev=
+			for tok in ${line}; do
+				case ${prev} in
+					dev) dev=${tok} ;;
+					src) src=${tok} ;;
+				esac
+				prev=${tok}
+			done
+		done < <(ip route get 1.1.1.1 2>/dev/null)
+	fi
+
+	# Two free signals that the *local* side was cycled since the last run,
+	# read straight from sysfs - no process, no network request:
+	#
+	#   flap    carrier_down_count (or carrier_changes on an older kernel): the
+	#           kernel's own tally of link losses. A router reboot drops carrier
+	#           for a moment even when the cable never moves, which is exactly
+	#           the case where the local address stays the same (routers derive
+	#           it from the MAC) and the external one does not.
+	#   rxpkts  the receive counter. It only ever goes up while an interface
+	#           exists, so a *decrease* means the interface was destroyed and
+	#           recreated - a driver reload, dhcpcd or NetworkManager re-plugging
+	#           the device - which is the same event seen from the other side.
+	#
+	# Both may be absent (older kernel, exotic driver); each is then left empty
+	# and simply does not contribute.
+	flap= rxpkts=
+	if [ -n "${dev}" ]; then
+		for f in carrier_down_count carrier_changes; do
+			if [ -z "${flap}" ] && [ -r "/sys/class/net/${dev}/${f}" ]; then
+				IFS= read -r flap <"/sys/class/net/${dev}/${f}"
+			fi
+		done
+		[ -r "/sys/class/net/${dev}/statistics/rx_packets" ] &&
+			IFS= read -r rxpkts \
+				<"/sys/class/net/${dev}/statistics/rx_packets"
+	fi
+
+	# /sys/class/net/<dev>/device/uevent is the driver's own name; no
+	# readlink+basename+subshell needed.
+	if [ -n "${dev}" ] && [ -r "/sys/class/net/${dev}/device/uevent" ]; then
+		while IFS= read -r line || [ -n "${line}" ]; do
+			case ${line} in
+				DRIVER=*) drv=${line#DRIVER=} ;;
+			esac
+		done <"/sys/class/net/${dev}/device/uevent"
+	fi
+
+	# Best effort external address, never fatal and never unbounded. Whether
+	# it is looked up at all is the caller's decision (TELEGRAM_EXT_CHECK), and
+	# TELEGRAM_SEND_IP=0 drops the field entirely.
+	if [ "${1}" = 1 ] && [ "${sendip}" != 0 ] && [ "${extdone}" -eq 0 ]; then
+		gatherext || true
+		ext=${extaddr}
+
+		# Once per run. With TELEGRAM_EXT_CHECK=always this function runs
+		# twice - once up front, once on the path that reports - and asking
+		# twice was two requests and two log lines for one answer.
+		extdone=1
+	fi
+
+	return 0
+}
+
+# External address from a third party. This is the least trustworthy field in
+# the message: the service can be slow, rate limited, blocked or captive-
+# portaled, and none of that says anything about this machine. Two consequences,
+# both handled by the caller:
+#   - the endpoints are rotated, so no single service sees every request;
+#   - a failure is reported as "unknown" and never treated as a change.
+#
+# api.ipify.org answers with the bare address and no HTML, which is why it is
+# first; ifconfig.me is the choice from telegram-send 0.4 and stays as a
+# fallback, and the rest spread the request over other operators. All are third
+# parties with their own limits - none is authoritative, and TELEGRAM_SEND_IP=0
+# drops the field entirely.
+#
+# One address family per run, chosen from our own ${src}: a dual-stack machine
+# has two legitimate external addresses, and different endpoints answer with
+# different ones (verified: api.ipify.org and checkip.amazonaws.com return the
+# IPv4 address, ifconfig.me, icanhazip.com and ident.me the IPv6 one). Rotating
+# between operators would therefore flip the field between v4 and v6, and the
+# comparison in the caller would read that as a change - a notification every
+# few ticks that says nothing happened. Asking curl for the family of ${src}
+# makes the field comparable across runs. If that family cannot be resolved the
+# answer is "unknown" rather than the other family, because a value from the
+# wrong family is exactly what we are avoiding here.
+#
+# Sets two globals rather than printing the address, because the caller runs it
+# in a command substitution today and a subshell would throw the operator away -
+# and knowing which of the seven services actually answered is the only way to
+# tell "this service is down" from "we have no internet".
+#   extaddr  the address, or "unknown"
+#   exturl   the endpoint that produced it, empty when none did
+extaddr=unknown
+exturl=
+extdone=0
+gatherext() {
+	local url out i n=${#exturls[@]} start=$((RANDOM % ${#exturls[@]})) fam
+
+	case ${src} in
+		*:* ) fam=--ipv6 ;;
+		* ) fam=--ipv4 ;;
+	esac
+
+	# RANDOM, not a counter: every run is a new process, so a counter would
+	# always start at exturls[0] and the first service would answer every
+	# single request. The loop still walks all of them, so a failure falls
+	# through to the next.
+	extaddr=unknown
+	exturl=
+
+	for ((i = 0; i < n; i++)); do
+		url=${exturls[$(((start + i) % n))]}
+		out=$(curl --silent --location "${fam}" --connect-timeout 3 \
+			--max-time 8 "${url}" 2>/dev/null)
+
+		# Accept an address and nothing else: an error page, a captive portal
+		# or a bare status code must never reach the message.
+		case ${out} in
+			'' | *[!0-9a-fA-F.:]*) continue ;;
+			*[.:]*) ;;	# an address has a dot or a colon, "301" does not
+			*) continue ;;
+		esac
+		[ "${#out}" -le 45 ] || continue	# longest IPv6, with scope
+
+		# Log the operator even though the caller only wants the value: this
+		# is the answer to "why is ext unknown today", which is otherwise
+		# invisible in the log.
+		log "external address ${out} from ${url}"
+		exturl=${url}
+		extaddr=${out}
+		return 0
+	done
+
+	log "external address unavailable (all ${n} endpoints failed)"
+	extaddr=unknown
+	exturl=
+	return 1
+}
+
+# The external address is advisory, and it must never regress: with
+# TELEGRAM_EXT_CHECK=on-change it is not looked up at all unless this run is
+# going to report something, and even then the service may be down. Keep the
+# last known value rather than overwriting a good one with "unknown".
+#
+# $1 = freshly resolved value (or "unknown"/empty)
+# $2 = value from the cache (may be empty)
+stickyext() {
+	if [ -z "${1}" ] || [ "${1}" = unknown ]; then
+		printf '%s' "${2:-unknown}"
+		return 0
+	fi
+
+	printf '%s' "${1}"
+}
+
+# ------------------------------------------------------------------- send ---
+
+send_message() {
+	local text=$1 n=0 rc=0 backoff=2 resp pinned=0 pin
+
+	# Pinned addresses are a fallback for a dead resolver, never the default:
+	# --resolve replaces the resolver's answer, so it must not be used while
+	# DNS works, or a rotated Telegram address would never be picked up.
+	pin=$(apipinned) || pin=''
+
+	while [ "${n}" -lt "${retries}" ]; do
+		n=$((n + 1))
+		if [ -n "${pin}" ] && [ "${pinned}" -eq 1 ]; then
+			resp=$(curl --silent --show-error \
+				--connect-timeout 5 --max-time 20 \
+				--resolve "api.telegram.org:443:${pin}" \
+				--data-urlencode "chat_id=${CHAT_ID}" \
+				--data-urlencode "text=${text}" \
+				--data-urlencode 'parse_mode=Markdown' \
+				"https://api.telegram.org/bot${TOKEN}/sendMessage" 2>&1)
+		else
+			resp=$(curl --silent --show-error \
+				--connect-timeout 5 --max-time 20 \
+				--data-urlencode "chat_id=${CHAT_ID}" \
+				--data-urlencode "text=${text}" \
+				--data-urlencode 'parse_mode=Markdown' \
+				"https://api.telegram.org/bot${TOKEN}/sendMessage" 2>&1)
+		fi
+		rc=$?
+
+		# A 401/400 is a perfectly fine HTTP exchange but a failed delivery:
+		# only the API's own "ok" tells success. Note that rc==0 with
+		# ok:false must still end up as a non-zero exit status.
+		if [ ${rc} -eq 0 ] && [[ ${resp} == *'"ok":true'* ]]; then
+			log "message sent after ${n} attempt(s) at [$(now)]"
+			return 0
+		fi
+
+		# Log the API answer: it carries Telegram's description field and
+		# is the only clue for "why did my notification not arrive".
+		log "send attempt ${n} failed (curl rc=${rc}): ${resp}"
+
+		# curl rc=6 is "could not resolve host": the one failure the pinned
+		# addresses can actually fix. Switch to them and retry immediately,
+		# without spending a backoff slot on a resolver that is not there.
+		if [ ${rc} -eq 6 ] && [ -n "${pin}" ] && [ "${pinned}" -eq 0 ]; then
+			pinned=1
+			log "resolver failed, retrying via pinned api.telegram.org addresses"
+			n=$((n - 1))
+			continue
+		fi
+
+		[ "${n}" -ge "${retries}" ] && break
+		sleep "${backoff}"
+		[ "${backoff}" -lt 16 ] && backoff=$((backoff * 2))
+	done
+
+	return 1
+}
+
+# ------------------------------------------------------------ last attempt ---
+
+# Split one line off the front of $_rest into $_head. Used to read the cache
+# back field by field, since the message at the end may contain newlines.
+_take() {
+	if [[ ${_rest} == *$'\n'* ]]; then
+		_head=${_rest%%$'\n'*}
+		_rest=${_rest#*$'\n'}
+	else
+		_head=${_rest}
+		_rest=
+	fi
+}
+
+# The cache holds the outcome of the last attempt (ok|fail) and the identity it
+# was made with: interface, driver, source address, external address, then the
+# message - one field per line, so a multi-line message compares correctly.
+#
+# No trailing newline after the identity: it is compared verbatim against the
+# same string rebuilt on the next run, and a stray newline there would make
+# every comparison fail - i.e. notify on every single tick.
+#
+# Written atomically (write a sibling, then rename) so an interrupted run can
+# never leave a half-written cache that would look like a change.
+remember() { # <ok|fail> [identity]
+	local id=${2-}
+
+	if printf '%s\n%s' "${1}" "${id}" >"${state}.new" 2>/dev/null &&
+		mv -f "${state}.new" "${state}" 2>/dev/null; then
+		return 0
+	fi
+
+	rm -f "${state}.new" 2>/dev/null
+	log "Could not write ${state}; every run will notify again."
+}
+
+# ------------------------------------------------------------------- main ---
+
+# No internet yet is not a failure of this script, it is a reason to try again
+# later: exit 75 so the unit can run us again. Record the failed attempt with an
+# empty identity, so the run that eventually gets a network notifies even if the
+# network is byte-for-byte the one last reported before the outage.
+wait_for_net || {
+	remember fail
+	retry_later "no internet within ${maxwait}s - retrying on the next unit cycle"
+}
+
+# First pass without the external address: with TELEGRAM_EXT_CHECK=on-change
+# (the default) this run must not touch a third party at all unless it is going
+# to report something. gather_netinfo 1 below fills it in when needed.
+gather_netinfo 0
+
+# TELEGRAM_EXT_CHECK=always asks a third party on every run, so that a change of
+# the external address alone (new uplink, CGNAT reassigned) is still noticed.
+# The default leaves it unset: on-change resolves it further down, and only on a
+# run that reports something anyway.
+[ "${extcheck}" = always ] && gather_netinfo 1
+
 message=$1
-[ -n "${message}" ] || message=$MESSAGE
+[ -n "${message}" ] || message=${MESSAGE:-}
 
-echo "[telegram-send] host:[${name}] dev:[${dev}] drv:[${drv}] src:[${src}] ext:[${ext}] ready at [$(date)]."
+# Refuse to describe a network we cannot identify: an empty interface or source
+# address means `ip route get` told us nothing useful (no default route, or no
+# ip(8) in the image). Sending "dev:[] src:[]" would be noise and would
+# overwrite a good cache entry, so the next tick would look like a change
+# again. Skip, and leave the cache alone.
+if [ -z "${dev}" ] || [ -z "${src}" ]; then
+	log "network identity incomplete (dev:[${dev}] drv:[${drv}] src:[${src}]), not notifying"
+	exit 0
+fi
 
-# Send message using curl
-curl -s -X POST "https://api.telegram.org/bot$TOKEN/sendMessage" \
-    -d "chat_id=$CHAT_ID" \
-    -d "text= $message @ \`host:[${name}] dev:[${dev}] drv:[${drv}] src:[${src}] ext:[${ext}]\`" \
-    -d "parse_mode=Markdown" > /dev/null
+# Read the cached attempt: status on the first line, then interface, driver,
+# source address, external address, the two link-cycle signals, and finally the
+# message - which may contain newlines, hence stepping first-line/rest instead
+# of a fixed split.
+#
+# The message stays last for that reason. Growing this record is therefore safe
+# only because nothing can read an older layout here: the cache lives in a tmpfs
+# that is empty after every reboot. A state file pointed at by TELEGRAM_STATE
+# outside tmpfs is the one case to think about before adding a field again.
+prev=''
+[ -r "${state}" ] && IFS= read -r -d '' prev <"${state}" 2>/dev/null
+prevstatus=${prev%%$'\n'*}
+_rest=${prev#*$'\n'}
+_take; pdev=${_head}
+_take; pdrv=${_head}
+_take; psrc=${_head}
+_take; pext=${_head}
+_take; pflap=${_head}
+_take; prxpkts=${_head}
+_take; pcycles=${_head}
+pmsg=${_rest}
 
-echo "[telegram-send] message:[${message}] sent at [$(date)]."
+# Does the local network identity match what was last reported? dev/drv/src come
+# from the kernel and the message from the caller, so this comparison is exact.
+localmatch=0
+[ "${pdev}" = "${dev}" ] && [ "${pdrv}" = "${drv}" ] &&
+	[ "${psrc}" = "${src}" ] && [ "${pmsg}" = "${message}" ] && localmatch=1
+
+# Drop the cycle notifications that have aged out of the window. Done once,
+# here, so that every path below can carry the same bounded list - at most
+# cyclemax entries - into the record it writes.
+nowepoch=$(epoch)
+recent=
+for t in ${pcycles}; do
+	isnum "${t}" || continue
+	[ "$((nowepoch - t))" -lt "${cyclewindow}" ] || continue
+	recent="${recent:+${recent} }${t}"
+done
+
+# Did the local side get cycled since the last attempt? This is what stands
+# between "on-change" and "always": both signals are free and local, so a quiet
+# machine still asks nobody, but a router restart - which almost never changes
+# dev/driver/src, because routers hand the same address to the same MAC - is
+# still noticed, because the link dropped for a moment.
+#
+# Only a *regression* counts, never growth: packet counters increase all day on
+# a busy link, and treating that as a change would ask a third party on every
+# tick, which is precisely what this mode exists to avoid.
+cycled=
+if [ -n "${pflap}" ] && isnum "${pflap}" && isnum "${flap}" &&
+	[ "${flap}" -gt "${pflap}" ]; then
+	cycled="carrier losses ${pflap} -> ${flap}"
+elif [ -n "${prxpkts}" ] && isnum "${prxpkts}" && isnum "${rxpkts}" &&
+	[ "${rxpkts}" -lt "${prxpkts}" ]; then
+	cycled="receive counter went backwards ${prxpkts} -> ${rxpkts}"
+fi
+
+# The external address is advisory. A lookup that failed yields "unknown", and a
+# service that flakes between working and not would otherwise look like a change
+# every other tick - a notification storm caused by an outage that has nothing
+# to do with this machine. So "unknown" on either side means "no information",
+# never "changed"; a real new address on both sides does count.
+if [ "${localmatch}" -eq 1 ] && [ "${prevstatus}" = ok ]; then
+	if [ -z "${cycled}" ] &&
+		{ [ -z "${pext}" ] || [ "${pext}" = unknown ] ||
+			[ "${ext}" = unknown ] || [ "${pext}" = "${ext}" ]; }; then
+
+		# Nothing to report. Resolve the display value *first*: on this path
+		# the lookup did not run (the default), so ${ext} is still "unknown"
+		# while the cache holds the real address - logging it raw made every
+		# later run look as if the lookup had stopped working.
+		ext=$(stickyext "${ext}" "${pext}")
+		info="host:[${host}] dev:[${dev}] drv:[${drv}] src:[${src}] ext:[${ext}]"
+
+		# Record the run anyway, so the cache keeps the value it already had
+		# and the next comparison is made against a real address.
+		printf -v identity '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s' \
+			"${dev}" "${drv}" "${src}" "${ext}" \
+			"${flap}" "${rxpkts}" "${recent}" "${message}"
+		remember ok "${identity}"
+		log "nothing changed since the last successful send (${info}), not notifying again"
+		exit 0
+	fi
+fi
+
+# Resolve the external address now that we know we are going to report: with
+# TELEGRAM_EXT_CHECK=on-change this is the only run that asks a third party.
+gather_netinfo 1
+
+# A lookup that fails here must not replace a good cached address with
+# "unknown": that loses information we already had, and makes the next run
+# compare against nothing.
+fresh=${ext}
+ext=$(stickyext "${fresh}" "${pext}")
+if [ "${ext}" != "${fresh}" ]; then
+	if [ "${extdone}" -eq 0 ]; then
+		# No lookup ran, so do not claim one failed: either TELEGRAM_SEND_IP=0
+		# dropped the field, or this run deliberately did not ask anybody
+		# (on-change with nothing to report).
+		log "external address not looked up, reporting the last known one (${ext})"
+	else
+		log "external address lookup failed, reporting the last known one (${ext})"
+	fi
+fi
+
+# A cycle is a change in its own right, and it is reported whether or not
+# anything else moved. That is the whole point of watching the link: the usual
+# cause is a router reboot, modern routers hand the same address to the same
+# MAC, so the local identity is typically untouched and the external address
+# typically comes back identical. Waiting for one of those to differ would mean
+# never reporting the one event worth knowing about - that the uplink bounced,
+# which usually explains whatever else went wrong around that time.
+#
+# A cycle also works as an out-of-band trigger: cycling the link is something a
+# person can do from the other end of the cable, so it forces a fresh status
+# message without waiting for the network to change in any other way. It is
+# detected from the kernel alone, so TELEGRAM_SEND_IP=0 does not disable it.
+#
+# The rate limit applies only when the cycle is the *sole* reason to report. A
+# real change of identity is never suppressed because the cable happens to be
+# flapping at the same moment, and the initial status is not counted at all -
+# see the cyclemax comment in the settings.
+if [ -n "${cycled}" ] && [ "${localmatch}" -eq 1 ] && [ "${prevstatus}" = ok ]; then
+	cyclereports=0
+	for t in ${recent}; do cyclereports=$((cyclereports + 1)); done
+
+	if [ "${cyclereports}" -ge "${cyclemax}" ]; then
+		printf -v identity '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s' \
+			"${dev}" "${drv}" "${src}" "${ext}" \
+			"${flap}" "${rxpkts}" "${recent}" "${message}"
+		remember ok "${identity}"
+		log "link cycled (${cycled}), but ${cyclereports} cycle reports already went out in the last ${cyclewindow}s, not notifying again"
+		exit 0
+	fi
+
+	recent="${recent:+${recent} }${nowepoch}"
+	log "reporting: ${cycled}"
+fi
+
+info="host:[${host}] dev:[${dev}] drv:[${drv}] src:[${src}] ext:[${ext}]"
+[ -n "${cycled}" ] && info="${info} link:[${cycled}]"
+printf -v identity '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s' \
+	"${dev}" "${drv}" "${src}" "${ext}" \
+	"${flap}" "${rxpkts}" "${recent}" "${message}"
+
+log "ready at [$(now)] ${info}"
+
+text="$(escape_md "${message}")"
+text+=" @ \`${info}\`"
+
+if send_message "${text}"; then
+	remember ok "${identity}"
+	log "message:[${message}] done at [$(now)]"
+else
+	remember fail "${identity}"
+	die "message:[${message}] could not be delivered"
+fi
