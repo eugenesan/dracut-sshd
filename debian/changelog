@@ -1,3 +1,50 @@
+dracut-sshd (0.7.1-5~eugenesan~resolute3) resolute; urgency=medium
+
+  * Build the source package as "3.0 (native)" rather than "3.0 (git)".
+
+    The package ships this fork's four modules and upstream's tarball does
+    not contain them, so a hand-built orig tarball had to be regenerated
+    for every upload. That was the status quo, and the previous attempt at
+    fixing it - "3.0 (git)" - replaced the tarball with a git bundle. That
+    removes the hand-built tarball but is awkward in the way that matters
+    here: the bundle has to sit beside the .dsc for dput to find it, and
+    Launchpad then has to consume a bundle rather than a tarball.
+
+    "3.0 (native)" has neither problem. There is no orig component at
+    all: dpkg-source puts the whole tree, debian/ included, into a single
+    dracut-sshd_<version>.tar.xz next to the .dsc, which is what dput and
+    every other Debian upload tool expect. For a package this size that is
+    the simpler arrangement and the one worth having.
+
+    debian/gbp.conf goes with the format it was written for: tagging and
+    git-buildpackage have no role in a native build.
+
+    NB: dpkg-source prints "native package version may not have a
+    revision" on every build, because the version carries the hyphen
+    that otherwise separates upstream from revision. It is a warning
+    only - the build succeeds and the upload is valid - and recording the
+    upstream base and the fork release counters is worth keeping even
+    though a native package has no upstream tarball to tell them apart
+    from.
+
+  * debian/watch stays deleted, as in the previous version. It tracked
+    gsauthof/dracut-sshd's tags, which made sense while the orig tarball
+    was upstream's and is actively harmful now: the next automatic bump
+    would fetch an upstream tarball with none of the fork's modules and
+    produce a build failure.
+
+  * debian/control: Homepage and the previously commented-out
+    Vcs-Browser/Vcs-Git now point at this fork rather than upstream, and
+    the Vcs fields are enabled so that Launchpad can offer to import from
+    git.
+
+  * debian/upstream/metadata: Repository, Repository-Browse and
+    Documentation repointed at this fork, Bug-Submit here as well, but
+    Bug-Database left on gsauthof/dracut-sshd, since that is still where
+    a bug in 46sshd belongs.
+
+ -- Eugene San (eugenesan) <eugenesan@gmail.com>  Sun, 11 Oct 2026 15:22:05 -0700
+
 dracut-sshd (0.7.1-5~eugenesan~resolute2) resolute; urgency=medium
 
   * debian/dracut-sshd.dirs: list 30network-manager-wireless. The package

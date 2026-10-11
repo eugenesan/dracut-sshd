@@ -5,9 +5,9 @@ Maintainer: Eugene San (eugenesan) <eugenesan@gmail.com>
 Rules-Requires-Root: no
 Build-Depends: debhelper-compat (= 13)
 Standards-Version: 4.7.2
-Homepage: https://github.com/gsauthof/dracut-sshd
-#Vcs-Browser: https://github.com/gsauthof/dracut-sshd
-#Vcs-Git: git+https://github.com/gsauthof/dracut-sshd.git
+Homepage: https://github.com/eugenesan/dracut-sshd
+Vcs-Browser: https://github.com/eugenesan/dracut-sshd
+Vcs-Git: https://github.com/eugenesan/dracut-sshd.git
 
 Package: dracut-sshd
 Architecture: all
