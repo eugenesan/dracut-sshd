@@ -1,3 +1,17 @@
+dracut-sshd (0.7.1-5~eugenesan~resolute2) resolute; urgency=medium
+
+  * debian/dracut-sshd.dirs: list 30network-manager-wireless. The package
+    installs into that module directory exactly as it does for the other
+    four, but .dirs had never named it. The module has been absent from
+    the file since the initial release, and the rework in 2-1 added
+    45netplan to it without adding 30network-manager-wireless, so the
+    omission has outlived every restructuring of debian/ since.
+    No functional change: dh_install creates the directory when it
+    places module-setup.sh, and every directory listed here receives a
+    file anyway. This only makes .dirs describe what the package owns.
+
+ -- Eugene San (eugenesan) <eugenesan@gmail.com>  Sun, 11 Oct 2026 14:07:43 -0700
+
 dracut-sshd (0.7.1-5~eugenesan~resolute1) resolute; urgency=medium
 
   * Move the fork's own content out of debian/ and into the source tree
