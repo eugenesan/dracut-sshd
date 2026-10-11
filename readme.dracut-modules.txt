@@ -1,12 +1,15 @@
 dracut-sshd: additional dracut modules
 ======================================
 
-Beyond the sshd module itself (46sshd, upstream), this package ships four
-more dracut modules.  They live in this source tree under
+Beyond the sshd module itself (46sshd, upstream), this source tree ships four
+more dracut modules.  Each is a top-level directory named for the module
+number dracut will order it by, sitting next to 46sshd:
 
-    debian/dracut/<module>/module-setup.sh
+    <NN><module>/module-setup.sh
 
-and are installed by debian/dracut-sshd.install into
+Copying such a directory to /usr/lib/dracut/modules.d/ is all it takes to
+enable it on any distribution; the Debian/Ubuntu package does exactly that
+via debian/dracut-sshd.install, into
 
     /usr/lib/dracut/modules.d/<NN><module>/
 
@@ -26,8 +29,15 @@ dracut orders modules by number.  The two networking modules are numbered
 before telegram-send so that whatever brings the interface up exists first;
 unlock-root runs late because it only rewrites /etc/shadow.
 
+47telegram-send is self-contained: its module-setup.sh picks up telegram-send,
+telegram-send.service and telegram-send.timer from its own directory, so it can
+be copied in without installing anything else first.  A standalone install
+still needs /root/.telegram_bot (see example/telegram-send.conf) or the module
+skips itself at image build time.
+
 All four are enabled from a single drop-in, installed as
-/etc/dracut.conf.d/sshd.conf (source: debian/config/sshd.conf):
+/etc/dracut.conf.d/90-sshd-ubuntu.conf (source:
+example/90-sshd-ubuntu.conf):
 
     kernel_cmdline="rd.neednet=1"
     add_dracutmodules+=" bash systemd-cryptsetup url-lib network netplan \
@@ -175,7 +185,7 @@ Token
 
     It must define TOKEN and CHAT_ID; MESSAGE is the default text.  The file is
     a shell fragment and is sourced.  Only an example is shipped, at
-    /usr/share/doc/dracut-sshd/examples/.telegram_bot - copy it yourself, or
+    /usr/share/doc/dracut-sshd/examples/telegram-send.conf - copy it yourself, or
     drop a real one at /root/.telegram_bot before building.
 
     The token ends up inside the initramfs image: treat /boot/initramfs-*.img

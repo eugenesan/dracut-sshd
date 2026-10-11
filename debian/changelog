@@ -1,3 +1,45 @@
+dracut-sshd (0.7.1-5~eugenesan~resolute1) resolute; urgency=medium
+
+  * Move the fork's own content out of debian/ and into the source tree
+    proper. debian/ was carrying eight files that are not packaging at
+    all - four dracut modules, the telegram-send script, the dracut
+    drop-in, the bot token example and the module documentation - and
+    the paths actively misled about that: debian/dracut/telegram-send/
+    telegram-send.service is a systemd unit, not packaging. Each dracut
+    module is now a top-level directory named for the number dracut
+    orders it by, next to upstream's 46sshd, which is how upstream
+    already models a module and what makes them usable without apt:
+
+      debian/dracut/netplan/                    -> 45netplan/
+      debian/dracut/network-manager-wireless/  -> 30network-manager-wireless/
+      debian/dracut/telegram-send/              -> 47telegram-send/
+      debian/dracut/unlock-root/                -> 82unlock-root/
+      debian/bin/telegram-send                  -> 47telegram-send/telegram-send
+      debian/config/sshd.conf                   -> example/90-sshd-ubuntu.conf
+      debian/config/.telegram_bot               -> example/telegram-send.conf
+      debian/readme.dracut-modules.txt          -> readme.dracut-modules.txt
+
+  * 47telegram-send is now self-contained. Its module-setup.sh already
+    preferred ${moddir}/telegram-send over the installed copy, but the
+    script lived in debian/bin, so the preference could never fire and a
+    standalone install had nothing to pick up. It now sits next to the
+    units it installs, so copying that one directory in is enough.
+
+  * Two installed files are renamed, which is the user-visible part of
+    this change:
+
+      /etc/dracut.conf.d/sshd.conf
+        -> /etc/dracut.conf.d/90-sshd-ubuntu.conf
+      /usr/share/doc/dracut-sshd/examples/.telegram_bot
+        -> /usr/share/doc/dracut-sshd/examples/telegram-send.conf
+
+    The drop-in keeps its contents. The token example is unchanged apart
+    from a comment header: it still has to be copied to /root/.telegram_bot
+    before update-initramfs, and the module still skips itself silently if
+    that file is absent.
+
+ -- Eugene San (eugenesan) <eugenesan@gmail.com>  Sun, 11 Oct 2026 14:05:00 -0700
+
 dracut-sshd (0.7.1-4~eugenesan~resolute4) resolute; urgency=medium
 
   * Fix a stale TELEGRAM_MAX_WAIT in the documentation. Both

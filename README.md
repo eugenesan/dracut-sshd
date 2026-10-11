@@ -209,11 +209,11 @@ image.
 The postinst triggers `update-initramfs`, so no separate rebuild is
 needed. Packages are published for the `resolute` and `stonking` suites.
 
-The drop-in at `/etc/dracut.conf.d/sshd.conf` sets `rd.neednet=1` and
-enables every module below. Note the consequence of `rd.neednet=1`: a
-machine whose network configuration does not match the hardware it
-booted on will not reach the root filesystem, and the console shows the
-initqueue retrying a hook. That is root unlock waiting, not the
+The drop-in at `/etc/dracut.conf.d/90-sshd-ubuntu.conf` sets
+`rd.neednet=1` and enables every module below. Note the consequence of
+`rd.neednet=1`: a machine whose network configuration does not match the
+hardware it booted on will not reach the root filesystem, and the console shows
+the initqueue retrying a hook. That is root unlock waiting, not the
 notification - see the "boot hangs" section of
 `/usr/share/doc/dracut-sshd/readme.dracut-modules.txt`, which also lists
 the netplan name-matching and `ip=dhcp` fallbacks.
@@ -228,9 +228,24 @@ the netplan name-matching and `ip=dhcp` fallbacks.
 | `telegram-send` | 47 | Telegram notification (below) |
 | `unlock-root` | 82 | keep `root` usable inside the initrd |
 
-Also installed: `/usr/bin/telegram-send`, the network stack the modules
-need, and `/usr/share/doc/dracut-sshd/readme.dracut-modules.txt`
-documenting all four modules. `unlock-root` is the piece that matters
+The four fork modules live in this repository as top-level directories
+named for the number dracut orders them by, sitting next to upstream's
+`46sshd/`. A dracut module is just a directory, so on any distribution -
+packaged or not - copying one in is all it takes to enable it:
+
+```
+# cp -r 45netplan /usr/lib/dracut/modules.d/
+```
+
+`47telegram-send/` is self-contained: it picks up its own script and units
+from its own directory, so it needs nothing else installed first. The rest
+ship only a `module-setup.sh`. `45netplan` and `30network-manager-wireless`
+are the least portable of the five, since netplan is an Ubuntu thing.
+
+Also installed by the package: `/usr/bin/telegram-send`, the network stack
+the modules need, `/etc/dracut.conf.d/90-sshd-ubuntu.conf`, and
+`/usr/share/doc/dracut-sshd/readme.dracut-modules.txt` documenting all four
+modules in depth. `unlock-root` is the piece that matters
 most on Ubuntu, whose default `root:!` in `/etc/shadow` otherwise leaves
 sshd with no usable account to log in as.
 
@@ -245,7 +260,7 @@ notification. A quiet machine therefore stays quiet.
 To enable it, create the token file before rebuilding the image:
 
 ```
-# cp /usr/share/doc/dracut-sshd/examples/.telegram_bot /root/.telegram_bot
+# cp /usr/share/doc/dracut-sshd/examples/telegram-send.conf /root/.telegram_bot
 # $EDITOR /root/.telegram_bot
 ```
 
