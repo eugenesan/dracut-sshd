@@ -1,3 +1,15 @@
+dracut-sshd (0.7.1-4~eugenesan~resolute4) resolute; urgency=medium
+
+  * Fix a stale TELEGRAM_MAX_WAIT in the documentation. Both
+    debian/dracut/telegram-send/telegram-send.timer and
+    debian/readme.dracut-modules.txt still said the service waits
+    300s, left over from before the previous version lowered it to
+    60s to keep the notification off the boot's critical path. The
+    script's own default is genuinely 300s, which is probably why
+    this survived; the timer comment now says so explicitly.
+
+ -- Eugene San (eugenesan) <eugenesan@gmail.com>  Sun, 11 Oct 2026 13:20:53 -0700
+
 dracut-sshd (0.7.1-4~eugenesan~resolute3) resolute; urgency=medium
 
   * telegram-send: keep the notification off the boot's critical path

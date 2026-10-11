@@ -38,8 +38,9 @@ Unit=telegram-send.service
 # Tighten to notice changes faster, loosen to cut wakeups; the number of
 # messages is unaffected either way.
 #
-# TELEGRAM_MAX_WAIT in the service is a separate thing and stays at 300s: how
-# long one run waits for the network to appear, not how often runs repeat.
+# TELEGRAM_MAX_WAIT in the service is a separate thing and is 60s: how long
+# one run waits for the network to appear, not how often runs repeat. The
+# script's own default is still 300s; the service overrides it.
 #
 # To go back to a single boot-time notification, delete this timer (the module
 # installs it as telegram-send.timer; the service alone is harmless).

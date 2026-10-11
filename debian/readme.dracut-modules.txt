@@ -191,7 +191,7 @@ Behaviour
     delay root unlock.
 
     telegram-send.timer checks every 5 minutes (OnBootSec, OnUnitActiveSec).
-    The service waits up to TELEGRAM_MAX_WAIT=300s for the internet, probes a
+    The service waits up to TELEGRAM_MAX_WAIT=60s for the internet, probes a
     rotating list of public connectivity endpoints, and sends only when
     something actually changed.  The cache in the runtime directory holds the
     last attempt's outcome plus the network identity, so you get one message per
