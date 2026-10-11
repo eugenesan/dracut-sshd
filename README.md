@@ -14,11 +14,19 @@ dracut-sshd, as long as it's configured with systemd and Dracut.
 
 2018-2026, Georg Sauthoff <mail@gms.tf>, GPLv3+
 
+> [!NOTE]
+> **This is a fork.** Upstream is [gsauthof/dracut-sshd][upstream], and
+> the documentation on this page is upstream's. This fork adds a
+> `debian/` tree that packages dracut-sshd for Ubuntu, ships four extra
+> dracut modules alongside `46sshd`, and adds a Telegram notification once
+> the machine is reachable. See [Ubuntu/Debian Package](#ubuntudebian-package).
+
 ## TOC
 
 - [Example: Open Encrypted Root Filesystem](#example-open-encrypted-root-filesystem)
 - [Example: Emergency Shell](#example-emergency-shell)
 - [Install](#install)
+- [Ubuntu/Debian Package](#ubuntudebian-package)
 - [Space Overhead](#space-overhead)
 - [Host Keys](#host-keys)
 - [Timeout](#timeout)
@@ -178,6 +186,115 @@ output or via `lsinitrd`, e.g.:
     -rwxr-xr-x   1 root     root       876328 Jul 17 17:04 usr/sbin/sshd
 
 Finally, reboot.
+
+
+## Ubuntu/Debian Package
+
+This section, and only this section, describes this fork rather than
+upstream.
+
+The module itself is upstream's, unmodified. What this fork adds is a
+`debian/` tree that packages it for Ubuntu, together with four extra
+dracut modules that upstream's packaging (Fedora, EPEL, openSUSE, AUR)
+does not ship, because they only make sense on a stock Ubuntu initramfs
+image.
+
+### Install
+
+```
+# add-apt-repository ppa:eugenesan/ppa
+# apt install dracut-sshd
+```
+
+The postinst triggers `update-initramfs`, so no separate rebuild is
+needed. Packages are published for the `resolute` and `stonking` suites.
+
+The drop-in at `/etc/dracut.conf.d/sshd.conf` sets `rd.neednet=1` and
+enables every module below. Note the consequence of `rd.neednet=1`: a
+machine whose network configuration does not match the hardware it
+booted on will not reach the root filesystem, and the console shows the
+initqueue retrying a hook. That is root unlock waiting, not the
+notification - see the "boot hangs" section of
+`/usr/share/doc/dracut-sshd/readme.dracut-modules.txt`, which also lists
+the netplan name-matching and `ip=dhcp` fallbacks.
+
+### What gets installed
+
+| Module | Number | Purpose |
+| --- | --- | --- |
+| `network-manager-wireless` | 30 | wifi and `wpa_supplicant` drivers |
+| `netplan` | 45 | Ubuntu's default network configuration |
+| `sshd` | 46 | upstream's module, as shipped |
+| `telegram-send` | 47 | Telegram notification (below) |
+| `unlock-root` | 82 | keep `root` usable inside the initrd |
+
+Also installed: `/usr/bin/telegram-send`, the network stack the modules
+need, and `/usr/share/doc/dracut-sshd/readme.dracut-modules.txt`
+documenting all four modules. `unlock-root` is the piece that matters
+most on Ubuntu, whose default `root:!` in `/etc/shadow` otherwise leaves
+sshd with no usable account to log in as.
+
+### Telegram notification
+
+`telegram-send` (v0.6) posts a message to a Telegram bot as soon as the
+machine is reachable, and every five minutes after that it re-checks and
+sends only when something actually changed - interface, driver, source
+address, external address, a link cycle, or a previously failed
+notification. A quiet machine therefore stays quiet.
+
+To enable it, create the token file before rebuilding the image:
+
+```
+# cp /usr/share/doc/dracut-sshd/examples/.telegram_bot /root/.telegram_bot
+# $EDITOR /root/.telegram_bot
+```
+
+The module reads `TOKEN` and `CHAT_ID` from it. Get them from
+[@BotFather](https://t.me/BotFather).
+
+Tuning is via environment variables in
+`/usr/lib/dracut/modules.d/47telegram-send/telegram-send.service` -
+`TELEGRAM_MAX_WAIT`, `TELEGRAM_RETRIES`, `TELEGRAM_EXT_CHECK`,
+`TELEGRAM_CYCLE_MAX` and `TELEGRAM_CYCLE_WINDOW` among them. All of them
+are documented in the script header and in
+`readme.dracut-modules.txt`.
+
+If the token file is missing, the module is skipped cleanly and the
+other three still install, so `apt install dracut-sshd` is safe to run
+before you have set it up.
+
+### Debugging
+
+The log and the change-detection cache live in a runtime directory
+chosen at run time (`$TELEGRAM_RUN_DIR`, then `$XDG_RUNTIME_DIR`, then
+`/run`, then `/tmp`). As shipped that is `/run`, so from a rescue shell
+(`rd.break`, or `init=/bin/bash`):
+
+```
+# tail -f /run/telegram-send.log
+```
+
+`tail` is in the image for exactly this - it is the one debugging tool
+no dracut module installs, unlike `readlink` and `sleep`, which `80base`
+provides.
+
+To rule the module out of a boot that misbehaves, add
+`rd.telegram-send=0` to the kernel command line. The script reads
+`/proc/cmdline`, logs "doing nothing" and exits 0 without touching the
+network. It can be typed at the boot prompt, which matters because a
+boot that hangs is exactly the case where there is no shell to stop the
+unit from.
+
+### Relationship to upstream
+
+Built against upstream 0.7.1 (commit `777c87c`, "remove spec file"), the
+version in the tree when the packaging started. `debian/patches/series`
+is empty: the packaging does not patch the module, and `46sshd` is
+installed as upstream ships it.
+
+The packaging history is on `master` as a series of commits tagged with
+the version they build, e.g. `debian 4-3: keep telegram-send off the
+boot's critical path`. `debian/changelog` has the full detail.
 
 
 ## Space Overhead
@@ -640,6 +757,7 @@ into an encrypted without having to re-install it from scratch.
 - [openSUSE](https://build.opensuse.org/package/show/openSUSE:Factory/dracut-sshd)
 - [Arch AUR](https://aur.archlinux.org/packages/dracut-sshd-git)
 - [Repology.org Overview](https://repology.org/project/dracut-sshd/versions)
+- [Ubuntu, this fork](https://launchpad.net/~eugenesan/+archive/ubuntu/ppa) (see [above](#ubuntudebian-package))
 
 
 
@@ -689,5 +807,6 @@ into an encrypted without having to re-install it from scratch.
 [tang]: https://github.com/latchset/tang
 [mandos]: https://www.recompile.se/mandos
 [unluks]: https://github.com/BarbarossaTM/fluffy-unluks
+[upstream]: https://github.com/gsauthof/dracut-sshd
 [gpl]: https://en.wikipedia.org/wiki/GNU_General_Public_License
 [neverslop]: https://gracefulliberty.com/llms/
